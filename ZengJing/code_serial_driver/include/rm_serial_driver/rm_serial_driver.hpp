@@ -28,7 +28,7 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker.hpp>
-
+#include "rm_serial_driver/packet_codec.hpp"
 #include "auto_aim_interfaces/msg/gimbal_cmd.hpp"
 #include "auto_aim_interfaces/msg/time_info.hpp"
 #include "rm_tools/heartbeat.hpp"
@@ -56,16 +56,17 @@ private:
   //   const auto_aim_interfaces::msg::GimbalCmd::ConstSharedPtr msg,
   //   const auto_aim_interfaces::msg::TimeInfo::ConstSharedPtr time_info);
   void syncDetectColorRequest(uint8_t color);
-  void handleControllerTaskCmd(const ReceivePacket & packet);
-  void publishControllerAuxData(const ReceivePacket & packet);
-  void publishGimbalTf(const ReceivePacket & packet);
+  void handleControllerTaskCmd(const ControllerCommand & cmd);
+  void publishControllerAuxData(const ControllerCommand & cmd);
+  void publishGimbalTf(const ControllerCommand & cmd);
   /////////////////////////////////////////////////////////////四个函数在这里///////////////////////////////////////////////////////////////////////////////
   void receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSharedPtr msg);//接受虚拟下位机发来的字节流
-  void onReceivePacket(const ReceivePacket & packet);
+  void onReceivePacket(const ControllerCommand & cmd);
   bool use_virtual_board_=false;//默认不用虚拟机，等到答辩的时候设置成true来连车
   std::string packet_topic_="/receive_packet"; //创建话题的默认值，方便后续setparameter
   rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr packet_sub_;//创建订阅者，订阅虚拟下位机发过来的字节流消息
   ///////////////////////////////////////----------------------------------------------------------------------------新增两个函数和三个变量来确认是否用虚拟下位机还是真实的串口
+  PacketCodec codec_;
   void reopenPort();
 
   void setParam(const rclcpp::Parameter & param);

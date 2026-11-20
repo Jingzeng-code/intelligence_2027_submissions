@@ -10,6 +10,7 @@
 
 namespace rm_serial_driver
 {
+  /////////////////////////////////会变
 struct ReceivePacket
 {
   uint8_t header = 0x5A;
@@ -25,7 +26,7 @@ struct ReceivePacket
   float bullet_speed;
   uint16_t checksum = 0;
 } __attribute__((packed));
-
+/// @brief ///////////////////////////////会变
 struct SendPacket
 {
   uint8_t header = 0xA5;

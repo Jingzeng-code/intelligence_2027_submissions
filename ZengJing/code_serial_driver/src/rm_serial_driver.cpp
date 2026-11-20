@@ -35,8 +35,6 @@
     {
       getParams();
     }
-    
-
     // for debug
     is_open_fire_control = this->declare_parameter("is_open_fire_control", true);
     // TF broadcaster
@@ -112,28 +110,18 @@
   void RMSerialDriver::receiveData()
   {
     std::vector<uint8_t> header(1); //那个连续字符串，准备给电控传过来的字符串转成结构体
-    std::vector<uint8_t> data;   
-    data.reserve(sizeof(ReceivePacket)); //给这个data分配内容，这个结构体在电控约定好的那个包里面，这里给它分配20个字节（160个比特）
+    //把原本给data分配固定内存那一部分给删掉了
     //我把验证crc16的处理逻辑新开了函数放进去了
     while (rclcpp::ok()) {
       try {
         serial_driver_->port()->receive(header); //拿到第三方库里port函数返回的串口底层对象，然后调用这个对象的receive方法
-        if (header[0] == 0x5A) {
-          data.resize(sizeof(ReceivePacket) - 1); //没有必要读完信息再去判断，直接判断信息头是不是我们需要的，这样子能节省时间，提升代码性能
-          serial_driver_->port()->receive(data);
-
-          data.insert(data.begin(), header[0]);
-          ReceivePacket packet = fromVector(data);
-          //crc16校验，验证这个数据包在传输过程中存不存在问题，没有就进行下一步操作，这一步明显和接受数据无关，需要和校验数据准确性的函数放在一起
-            if(crc16::Verify_CRC16_Check_Sum(reinterpret_cast<const uint8_t *>(&packet), sizeof(packet)))
-            {
-              onReceivePacket(packet);//把处理逻辑都封装进一个函数里，方便后续切换虚拟下位机和真实串口之间
-            } else {
-            RCLCPP_ERROR(get_logger(), "CRC error!");
-          } 
-        }else {
-          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 20, "Invalid header: %02X", header[0]);
+        codec_.copydata(header.data(), header.size());
+        ControllerCommand cmd;
+        if(codec_.decode(cmd))
+        {
+          onReceivePacket(cmd);
         }
+        
       } catch (const std::exception & ex) {
         RCLCPP_ERROR_THROTTLE( //高阶版的日志打印，比INFO和ERROR好一点，因为可以控制日志的打印时间
           get_logger(), *get_clock(), 20, "Error while receiving data: %s", ex.what());
@@ -141,9 +129,9 @@
       }
     }
   }
-  void RMSerialDriver::onReceivePacket(const ReceivePacket & packet)
+  void RMSerialDriver::onReceivePacket(const ControllerCommand & cmd)
 {
-  const auto packet_detect_color = static_cast<uint8_t>(packet.detect_color);
+  const auto packet_detect_color = static_cast<uint8_t>(cmd.detect_color);
               //先强制转化数据里的颜色，方便后续处理
               //把里面的实现逻辑解耦出来
               //同步颜色的逻辑函数 判断同步处理颜色的逻辑
@@ -154,34 +142,21 @@
                 syncDetectColorRequest(packet_detect_color); //同步并检测是否同步成功
               }
             //是否要reset的逻辑，攻击目标转换的逻辑
-            handleControllerTaskCmd(packet);
+            handleControllerTaskCmd(cmd);
             //速度和开火这些值的初始化
-            publishControllerAuxData(packet);
+            publishControllerAuxData(cmd);
             //TF坐标变换和发布
-            publishGimbalTf(packet);
+            publishGimbalTf(cmd);
 }
 
 void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSharedPtr msg)
 {
-  if (msg->data.size() != sizeof(ReceivePacket)) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000, "bad frame size %zu, expect %zu",
-      msg->data.size(), sizeof(ReceivePacket));
-    return;
+  ///之前处理虚拟下位机发过来的包的时候给他写死了，现在转化成这样再去处理数据包
+   codec_.copydata(msg->data.data(), msg->data.size());
+   ControllerCommand cmd;
+  if(codec_.decode(cmd)) {
+    onReceivePacket(cmd);
   }
-  if (msg->data.front() != 0x5A) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000, "invalid header 0x%02X", msg->data.front());
-    return;
-  }
-
-  const ReceivePacket packet = fromVector(msg->data);
-  if (!crc16::Verify_CRC16_Check_Sum(
-        reinterpret_cast<const uint8_t *>(&packet), sizeof(packet))) {
-    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000, "CRC error!");
-    return;
-  }
-  onReceivePacket(packet);
 }
   void RMSerialDriver::syncDetectColorRequest(uint8_t color)
   {
@@ -200,41 +175,41 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
             }
 
   }
-  void RMSerialDriver::handleControllerTaskCmd(const ReceivePacket & packet)
+  void RMSerialDriver::handleControllerTaskCmd(const ControllerCommand & cmd)
   {
-  if (packet.reset_tracker) {
+  if (cmd.reset_tracker) {
               resetTracker();
             }
 
-            if (packet.change_target) {
+            if (cmd.change_target) {
               changeTarget();
             }
-            //具体就看和电控约定好的那个包，0，1，2分别代表什么
+            //具体就看和电控约定好的那个包，我不管你0，1，2代表什么，我直接关键字索引，这样就能少改很多代码了
             std_msgs::msg::String task;
-            if (packet.task_mode == 0)
+            if (cmd.task_mode == ControllerCommand::Task::aim)
               task.data = "aim";
-            else if (packet.task_mode == 1)
+            else if (cmd.task_mode == ControllerCommand::Task::small_buff)
               task.data = "small_buff";
-            else if (packet.task_mode == 2)
+            else if (cmd.task_mode == ControllerCommand::Task::large_buff)
               task.data = "large_buff";
             // 保底是自瞄
             else
               task.data = "aim";
             task_pub_->publish(task); //发布给视觉节点
   }
-  void RMSerialDriver::publishControllerAuxData(const ReceivePacket & packet)
+  void RMSerialDriver::publishControllerAuxData(const ControllerCommand & cmd)
   {
     std_msgs::msg::Float32 bullet_speed;
-            bullet_speed.data = packet.bullet_speed;
+            bullet_speed.data =cmd.bullet_speed;
             bullet_speed_pub_->publish(bullet_speed);
             std_msgs::msg::String record_controller;
-            record_controller.data = packet.is_play ? "start" : "stop";
+            record_controller.data = cmd.is_play ? "start" : "stop";
             record_controller_pub_->publish(record_controller);
             std_msgs::msg::Bool is_play;
-            is_play.data = packet.is_play != 0;
+            is_play.data = cmd.is_play!=0;
             is_play_pub_->publish(is_play);
   }
-  void RMSerialDriver::publishGimbalTf(const ReceivePacket & packet)
+  void RMSerialDriver::publishGimbalTf(const ControllerCommand & cmd)
   {
   //后续就是TF坐标的发布了
             geometry_msgs::msg::TransformStamped yaw_t;
@@ -247,8 +222,8 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
             yaw_t.header.stamp = stamp;
             yaw_t.header.frame_id = "odom";
             yaw_t.child_frame_id = "yaw_link";
-            const double yaw = packet.yaw;
-            const double roll = packet.roll;
+            const double yaw = cmd.yaw;
+            const double roll = cmd.roll;
             yaw_t.transform.translation.x = 0.0;
             yaw_t.transform.translation.y = 0.0;
             yaw_t.transform.translation.z = 0.0;  //x,y,z不做平移，这里的坐标变换只是在做角度旋转
@@ -266,7 +241,7 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
             pitch_t.transform.translation.y = 0.0;
             pitch_t.transform.translation.z = 0.0;
             tf2::Quaternion q_pitch;
-            q_pitch.setRPY(0.0, packet.pitch, 0.0);
+            q_pitch.setRPY(0.0, cmd.pitch, 0.0);
             pitch_t.transform.rotation = tf2::toMsg(q_pitch);
             tf_broadcaster_->sendTransform(yaw_t);
             tf_broadcaster_->sendTransform(pitch_t);
@@ -275,24 +250,14 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
   void RMSerialDriver::sendArmorData(const auto_aim_interfaces::msg::GimbalCmd::ConstSharedPtr msg)
   {
     try {
-      SendPacket packet;
-      packet.control = msg->control;
+      auto_aim_interfaces::msg::GimbalCmd cmd = *msg;
       if (!is_open_fire_control)
-        packet.fire = 1;
-      else
-        packet.fire = msg->fire;
-      packet.yaw = msg->yaw;
-      packet.yaw_vel = msg->yaw_vel;
-      packet.yaw_acc = msg->yaw_acc;
-      packet.pitch = msg->pitch;
-      packet.pitch_vel = msg->pitch_vel;
-      packet.pitch_acc = msg->pitch_acc;
+        cmd.fire = 1;
+      //我把处理数据的逻辑放到了packet_codec里面，这样子我认为算是解耦了吧  
       // 20240329 ZY: Eliminate communication latency
-      crc16::Append_CRC16_Check_Sum(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
-
-      std::vector<uint8_t> data = toVector(packet);
-
-      serial_driver_->port()->send(data);
+      
+                /////////默认给他设置成false，那样encode里面的逻辑就是处理armor的
+      serial_driver_->port()->send(codec_.encode(cmd,false));
       if (msg->control) {
         std_msgs::msg::Float64 latency;
         latency.data = (this->now() - msg->header.stamp).seconds() * 1000.0;
@@ -308,21 +273,9 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
   void RMSerialDriver::sendBuffData(const auto_aim_interfaces::msg::GimbalCmd::ConstSharedPtr msg)
   {
     try {
-      SendPacket packet;
-      packet.control = msg->control;
-      packet.fire = msg->fire;
-      packet.yaw = msg->yaw;
-      packet.pitch = -msg->pitch;
-      packet.yaw_vel = 0.0;
-      packet.yaw_acc = 0.0;
-      packet.pitch_vel = 0.0;
-      packet.pitch_acc = 0.0;
-      // 20240329 ZY: Eliminate communication latency
-      crc16::Append_CRC16_Check_Sum(reinterpret_cast<uint8_t *>(&packet), sizeof(packet));
-
-      std::vector<uint8_t> data = toVector(packet);
-
-      serial_driver_->port()->send(data);
+      //这里的处理逻辑本质上和上面还是一样的，所以直接利用19期的视频里面那个给他抽象出来就行了
+      serial_driver_->port()->send(codec_.encode(*msg,true));
+      //默认值设置成true，说明此时在处理能量机关的数据
       if (msg->control) {
         std_msgs::msg::Float64 latency;
         latency.data = (this->now() - msg->header.stamp).seconds() * 1000.0;
@@ -334,7 +287,7 @@ void RMSerialDriver::receiveTopic(const std_msgs::msg::UInt8MultiArray::ConstSha
       reopenPort();
     }
   }
-
+//getparms基本上不用改，本来就是一个作为初始化的函数，等需求变了再改吧
   void RMSerialDriver::getParams()
   {
     using FlowControl = drivers::serial_driver::FlowControl;
